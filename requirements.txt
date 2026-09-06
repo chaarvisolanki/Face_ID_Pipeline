@@ -1,0 +1,10 @@
+# Windows-compatible prebuilt dlib wheel. Install face-recognition separately
+# with --no-deps as described in README.md.
+dlib-bin==20.0.1
+face-recognition-models==0.3.0
+click>=6.0
+numpy
+Pillow
+requests
+web3
+python-dotenv
