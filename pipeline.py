@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 SOCIAL_DOMAINS = (
     "instagram.com",
@@ -18,6 +19,14 @@ SOCIAL_DOMAINS = (
     "facebook.com",
     "linkedin.com",
 )
+INSTAGRAM_IGNORED_PATHS = {"reel", "reels", "tv"}
+INSTAGRAM_UTILITY_PATHS = {
+    "accounts",
+    "direct",
+    "emails",
+    "explore",
+    "stories",
+}
 DEFAULT_AMOY_RPC_URL = "https://rpc-amoy.polygon.technology"
 AMOY_CHAIN_ID = 80002
 
@@ -53,7 +62,26 @@ def detect_and_encode(image_path: Path) -> list[float]:
         raise RuntimeError(f"Face detection failed: {exc}") from exc
 
 
-def find_social_match(image_path: Path) -> str:
+def is_supported_social_url(url: str) -> bool:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower().removeprefix("www.")
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    if hostname == "instagram.com":
+        if not path_parts or path_parts[0].lower() in INSTAGRAM_IGNORED_PATHS:
+            return False
+        if path_parts[0].lower() == "p":
+            return len(path_parts) >= 2
+        return len(path_parts) == 1 and path_parts[0].lower() not in INSTAGRAM_UTILITY_PATHS
+
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in SOCIAL_DOMAINS
+        if domain != "instagram.com"
+    )
+
+
+def find_social_matches(image_path: Path) -> list[str]:
     try:
         import requests
 
@@ -93,11 +121,16 @@ def find_social_match(image_path: Path) -> str:
         if results.get("error"):
             raise RuntimeError(results["error"])
         candidates = results.get("exact_matches", []) + results.get("visual_matches", [])
+        matches: list[str] = []
         for match in candidates:
             url = match.get("link", "")
-            if any(domain in url.lower() for domain in SOCIAL_DOMAINS):
+            if is_supported_social_url(url):
+                if url not in matches:
+                    matches.append(url)
+        if matches:
+            for url in matches:
                 LOGGER.info("Reverse-image match found: %s", url)
-                return url
+            return matches
         LOGGER.info(
             "No matching Instagram, X/Twitter, Facebook, or LinkedIn page was found. "
             "Exiting without fabricating a result."
@@ -126,7 +159,7 @@ def confirm_post(url: str) -> dict[str, str | int]:
             "fetched_at": fetched_at,
         }
         LOGGER.info(
-            "Post confirmed: HTTP %s at %s",
+            "Social page confirmed: HTTP %s at %s",
             response.status_code,
             fetched_at,
         )
@@ -149,20 +182,41 @@ def build_hashes(encoding: list[float], matched_url: str) -> tuple[dict[str, str
     return record, record_hash
 
 
-def send_transaction(record_hash: str) -> str:
-    private_key = os.getenv("PRIVATE_KEY")
-    if not private_key:
-        raise RuntimeError("PRIVATE_KEY is missing from the environment.")
-    rpc_url = os.getenv("POLYGON_AMOY_RPC_URL", DEFAULT_AMOY_RPC_URL)
+def send_transaction(record_hash: str) -> str | None:
+    private_key = os.getenv("PRIVATE_KEY", "").strip()
+    if not private_key or private_key.startswith("your_"):
+        LOGGER.info(
+            "Dry run: no Polygon Amoy transaction submitted because PRIVATE_KEY "
+            "is not configured. Hash: %s",
+            record_hash,
+        )
+        return None
+    rpc_url = os.getenv("POLYGON_AMOY_RPC_URL", DEFAULT_AMOY_RPC_URL).strip()
     try:
         from web3 import Web3
 
         web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
         if not web3.is_connected():
-            raise RuntimeError(f"Could not connect to Polygon Amoy RPC: {rpc_url}")
+            raise RuntimeError(
+                "Could not connect to the configured Polygon Amoy RPC. "
+                "Check the QuickNode URL and your internet connection."
+            )
+        if web3.eth.chain_id != AMOY_CHAIN_ID:
+            raise RuntimeError(
+                f"Configured RPC is chain ID {web3.eth.chain_id}, not Polygon Amoy "
+                f"({AMOY_CHAIN_ID})."
+            )
         account = web3.eth.account.from_key(private_key)
         nonce = web3.eth.get_transaction_count(account.address, "pending")
         gas_price = web3.eth.gas_price
+        balance = web3.eth.get_balance(account.address)
+        if balance == 0:
+            LOGGER.info(
+                "Dry run: wallet has no Polygon Amoy test POL, so no transaction "
+                "was submitted. Hash: %s",
+                record_hash,
+            )
+            return None
         transaction: dict[str, Any] = {
             "chainId": AMOY_CHAIN_ID,
             "nonce": nonce,
@@ -208,12 +262,19 @@ def main() -> int:
         validate_serpapi_key()
 
         encoding = detect_and_encode(args.image_path)
-        matched_url = find_social_match(args.image_path)
-        post = confirm_post(matched_url)
-        record, record_hash = build_hashes(encoding, str(post["url"]))
+        matched_urls = find_social_matches(args.image_path)
+        posts = [confirm_post(url) for url in matched_urls]
+        confirmed_urls = ", ".join(str(post["url"]) for post in posts)
+        record, record_hash = build_hashes(encoding, confirmed_urls)
         LOGGER.info("Record prepared: %s", record)
         tx_hash = send_transaction(record_hash)
-        LOGGER.info("Polygonscan URL: https://amoy.polygonscan.com/tx/%s", tx_hash)
+        if tx_hash:
+            LOGGER.info("Polygonscan URL: https://amoy.polygonscan.com/tx/%s", tx_hash)
+        else:
+            LOGGER.info(
+                "Pipeline completed in dry-run mode. The hash is ready for a "
+                "Polygon Amoy transaction when test POL is available."
+            )
         return 0
     except LookupError:
         return 0

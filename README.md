@@ -81,13 +81,21 @@ Example:
 .\.venv\Scripts\python.exe pipeline.py "images\Billie_Eilish.jpg"
 ```
 
+If no Polygon Amoy test POL or private key is available, the script completes
+in dry-run mode. It prints the prepared SHA256 hash and clearly reports that
+no blockchain transaction was submitted. This keeps the demonstration honest:
+the hash is never presented as a transaction.
+
 ## Pipeline stages
 
 1. Load and validate the input image.
 2. Detect exactly one face and create its 128-value encoding.
-3. Upload the image to SerpApi's image endpoint and use Google Lens to find the
-   first matching page on a supported social platform. No result is hardcoded.
-4. Fetch the match and record its final URL, HTTP status, and fetch time.
+3. Upload the image to SerpApi's image endpoint and use Google Lens to find
+   matching pages on supported social platforms. For Instagram, only a matching
+   post (`/p/...`) or profile (`/<account>/`) is accepted. Reels, videos,
+   stories, and utility pages are excluded before they are displayed or fetched.
+   No result is hardcoded.
+4. Fetch each match and record its final URL, HTTP status, and fetch time.
 5. Hash the face encoding and the complete verification record with SHA256.
 6. Sign and send a raw Polygon Amoy transaction with the record hash in its
    `data` field.
@@ -102,7 +110,7 @@ face encoding, genuine reverse-image matching, post confirmation, and the
 transaction. Finish by opening the printed Amoy Polygonscan URL.
 
 The most useful code to show is the `detect_and_encode`,
-`find_social_match`, `confirm_post`, `build_hashes`, and `send_transaction`
+`find_social_matches`, `confirm_post`, `build_hashes`, and `send_transaction`
 functions. Explain that each stage is a small reusable function, and that the
 same timestamp, hashing, and error-handling helpers are reused instead of
 duplicating logic.
